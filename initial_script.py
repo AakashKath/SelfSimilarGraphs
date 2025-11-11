@@ -342,8 +342,6 @@ def stub_matching(graph):
     return predicted_edges, predicted_matrix
 
 def plot_spectral_density(adjacency_matrix, ax=None):
-#    print("eigenvalue function")
-#    pdb.set_trace()
     hamiltonian_matrix = sp.csr_matrix(adjacency_matrix)
     dos = kwant.kpm.SpectralDensity(hamiltonian_matrix)
     k = min(50, adjacency_matrix.shape[0]-2)
@@ -391,7 +389,18 @@ if __name__ == "__main__":
     else:
         reader = GraphReader(args.community_size, args.child_directory)
         graph = reader.read_metis_file()
+        start_time = time.time()
         predicted_edges, predicted_matrix = stub_matching(graph)
+        end_time = time.time()
+
+        num_nodes = len(graph.nodes)
+        original_edges = set()
+        for i in range(num_nodes):
+            for j in range(i, num_nodes):
+                if graph.adjacency_matrix[i, j] == 1:
+                    original_edges.add((i+1, j+1))
+        predicted_edges = set([(min(a, b), max(a, b)) for a, b in predicted_edges])
+        print(f"Time taken: {end_time - start_time} seconds. Newly seen edges: {(len(predicted_edges - original_edges)*100.0)/len(predicted_edges)}%")
 
         fig, axes = plt.subplots(1, 2, figsize=(16, 8))
         plot_spectral_density(graph.adjacency_matrix, ax=axes[0])
@@ -402,19 +411,4 @@ if __name__ == "__main__":
         axes[1].set_ylim(ymin, ymax)
         plt.tight_layout()
         plt.show()
-"""
-        fig, axes = plt.subplots(1, 2, figsize=(16,8))
-        graph.visualize_graph(ax=axes[0])
-        start_time = time.time()
-        graph.visualize_graph(predicted_edges, ax=axes[1])
-        plt.tight_layout()
-        plt.show()
-        num_nodes = len(graph.nodes)
-        original_edges = set()
-        for i in range(num_nodes):
-            for j in range(i, num_nodes):
-                if graph.adjacency_matrix[i, j] == 1:
-                    original_edges.add((i+1, j+1))
-        predicted_edges = set([(min(a, b), max(a, b)) for a, b in predicted_edges])
-        print(f"Time taken: {time.time() - start_time} seconds. Newly seen edges: {(len(predicted_edges - original_edges)*100.0)/len(predicted_edges)}%")
-"""
+
