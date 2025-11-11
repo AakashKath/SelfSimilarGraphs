@@ -1,0 +1,90 @@
+\documentclass{article}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+
+\title{Summary of BigClam: Overlapping Community Detection}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+BigClam (Big Clustering using Affiliation Model) is a scalable community detection algorithm designed to identify overlapping communities in large-scale networks. Traditional community detection methods typically assume that communities are disjoint, which fails to capture the fact that nodes (e.g., people, organizations) often belong to multiple communities simultaneously. BigClam addresses this limitation by modeling the \textit{strength of affiliation} between nodes and communities using a continuous-valued, non-negative membership matrix, and efficiently infers these affiliations using a likelihood maximization approach.
+
+BigClam builds on the \textbf{Community-Affiliation Graph Model (AGM)}, extending it with continuous community memberships and an efficient optimization procedure to enable scalability to networks with millions of nodes and edges.
+
+\section{Community-Affiliation Graph Model (AGM)}
+The Community-Affiliation Graph Model explains the formation of edges in a network through shared community memberships. It is defined as a bipartite affiliation graph \(B(V, C, M)\), where:
+\begin{itemize}
+    \item \( V \): set of nodes,
+    \item \(C\): set of communities,
+    \item \(M_{uc} = 1\) if node \(u\) belongs to community \(c\), 0 otherwise.
+\end{itemize}
+
+Each community \(c\) has an internal connection probability \(p_c\). Two nodes \(u\) and \(v\) are connected in the observed graph with probability:
+\[
+p(u,v) = 1 - \prod_{c \in C_{uv}} (1-p_c)
+\]
+where \(C_{uv}\) is the set of communities shared by \(u\) and \(v\).
+
+\section{Observation}
+\begin{itemize}
+    \item Ground-truth communities often contain high-degree hub nodes located in overlapping regions.
+    \item Overlapping areas between communities tend to be more densely connected than non-overlapping parts.
+    \item Approximately 95\% of communities overlap with at least one other community.
+    \item Only about 15\% of community members belong exclusively to a single community.
+\end{itemize}
+
+\section{BigClam formulation}
+BigClam assumes an undirected, unweighted, static graph where edge formation is modeled as a Poisson process in terms of the interaction strength between node pairs.
+
+\subsection{Edge Probability Derivation}
+Let \(X_{uv}^{(c)}\) denote the latent interaction strength between \(u\) and \(v\) contributed by community \(c\):
+\[
+    X_{uv}^{(c)} \sim \text{Pois}(M_{uc} M_{vc})
+\]
+
+The total interaction strength is then:
+\[
+    X_{uv} = \sum_c X_{uv}^{(c)} \sim \text{Pois}\left(\sum_c M_{uc} M_{vc}\right)
+\]
+
+The probability of an edge existing between \(u\) and \(v\) is the probability that at least one interaction occurs:
+\[
+    \begin{aligned}
+        p(u,v) &= \Pr(X_{uv} > 0) = 1 - \Pr(X_{uv} = 0) \\
+        &= 1 - e^{-M_u M_v^T}
+    \end{aligned}
+\]
+
+Thus, two nodes are connected with probability \(1 - e^{-M_u M_v^T}\), where \(M_u\) and \(M_v\) are their community affiliation vectors.
+
+Nodes with zero affinity to all communities are assigned to an \(\epsilon\)-community, whose edge probability equals the background edge probability:
+\[
+    \epsilon = \frac{2|E|}{|V|(|V| - 1)}
+\]
+
+\subsection{Model Fitting via Likelihood Maximization}
+To estimate the community affiliation matrix \(M\), BigClam maximizes the log-likelihood of the observed graph \(G = (V, E)\) given \(M\):
+\[
+    \begin{aligned}
+        l(M) &= \log P(G | M) \\
+        &= \sum_{(u,v) \in E} \log(1 - e^{-M_u M_v^T}) - \sum_{(u,v) \notin E} M_u M_v^T
+    \end{aligned}
+\]
+
+For a single node \(u\), the contribution to the likelihood is:
+\[
+    l(M_u) = \sum_{v \in \mathcal{N}(u)} \log(1 - e^{-M_u M_v^T}) - \sum_{v \notin \mathcal{N}(u)} M_u M_v^T
+\]
+where \(\mathcal{N}(u)\) denotes the neighbor set of \(u\).
+
+\subsection{Gradient Ascent for Maximization}
+BigClam employs \textit{projected gradient ascent} to update \(M_u\) while keeping all other node vectors fixed. The gradient is given by:
+\[
+    \nabla l(M_u) = \sum_{v \in \mathcal{N}(u)} M_v \frac{e^{-M_u M_v^T}}{1 - e^{-M_u M_v^T}} - \sum_{v \notin \mathcal{N}(u)} M_v
+\]
+This update can be further optimized to near-constant time complexity per node since \(|\mathcal{N}(u)| \ll |V|\).
+
+\end{document}
