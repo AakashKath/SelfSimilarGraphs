@@ -12,6 +12,7 @@ from matplotlib.patches import Patch, Ellipse
 from scipy.sparse.linalg import eigsh
 
 epsilon = 1e-8
+percent_eigenvalue_plot = 0.1
 
 class Remapper:
     edge_file: str
@@ -102,14 +103,18 @@ class Remapper:
 
 class Node:
     neighbors: list[int]
+    predicted_neighbors: list[int]
     communities: list[int]
     degree: int
+    static_stubs: list[list[int]]
     stubs: list[list[int]]
 
     def __init__(self):
         self.neighbors = []
+        self.predicted_neighbors = []
         self.communities = []
         self.degree = 0
+        self.static_stubs = []
         self.stubs = []
 
     def add_community(self, comm_id):
@@ -156,6 +161,7 @@ class Graph:
         for node in self.nodes:
             for neighbor_id in node.neighbors:
                 neighbor = self.get_node(neighbor_id)
+                node.static_stubs.append(list(neighbor.communities))
                 node.stubs.append(list(neighbor.communities))
 
     def visualize_graph(self, edges_to_be_added = [], ax = None):
@@ -314,38 +320,86 @@ def stub_matching(graph):
     random.shuffle(randomly_ordered_nodes)
     predicted_edges = []
     predicted_matrix = np.zeros((n, n), dtype=int)
+    unmatched_stubs = []
     for node_id in randomly_ordered_nodes:
         used_nodes = {node_id}  # dont allow multi edges
         node = graph.get_node(node_id)
         expected_communities = node.communities
-        for stub in node.stubs:
-            probable_nodes = set.intersection(*(graph.communities[comm] for comm in stub))
-            probable_nodes -= used_nodes
-            probable_nodes = [v for v in probable_nodes if graph.get_node(v).communities == stub]
-            chosen_node_id = None
-            best_counter = 0
-            for dest_node_id in probable_nodes:
+        while node.stubs:
+            stub = node.stubs.pop(0)
+            initial_nodes = set.intersection(*(graph.communities[comm] for comm in stub))
+            initial_nodes -= used_nodes
+            probable_nodes = []
+            stub_weights = []
+            for dest_node_id in initial_nodes:
                 dest_node = graph.get_node(dest_node_id)
-                counter = dest_node.stubs.count(expected_communities)
-                if counter > best_counter:
-                    chosen_node_id = dest_node_id
-                    best_counter = counter
-            if chosen_node_id is None:
-                pdb.set_trace()
-            chosen_node = graph.get_node(chosen_node_id)
-            chosen_node.stubs.remove(expected_communities)
-            used_nodes.add(chosen_node_id)
-            predicted_edges.append((node_id, chosen_node_id))
+                stub_counter = dest_node.stubs.count(expected_communities)
+                if dest_node.communities == stub and stub_counter > 0:
+                    probable_nodes.append(dest_node_id)
+                    stub_weights.append(stub_counter)
+            if len(probable_nodes) > 0:
+                chosen_node_id = random.choices(probable_nodes, weights=stub_weights, k=1)[0]
+                chosen_node = graph.get_node(chosen_node_id)
+                chosen_node.stubs.remove(expected_communities)
+                used_nodes.add(chosen_node_id)
+                node.predicted_neighbors.append(chosen_node_id)
+                chosen_node.predicted_neighbors.append(node_id)
+                predicted_edges.append((min(node_id, chosen_node_id), max(node_id, chosen_node_id)))
+                predicted_matrix[node_id-1, chosen_node_id-1] = 1
+                predicted_matrix[chosen_node_id-1, node_id-1] = 1
+            else:
+                unmatched_stubs.append((node_id, stub))
+    # Phase 2: Handle unmatched stubs
+    if len(unmatched_stubs) > 0:
+        print("Going through phase 2...")
+    while unmatched_stubs:
+        node_id, dest_comms = unmatched_stubs.pop(0)
+        node = graph.get_node(node_id)
+        dest_nodes = set.intersection(*(graph.communities[comm] for comm in dest_comms))
+        dest_nodes = [v for v in dest_nodes if graph.get_node(v).communities == dest_comms and graph.get_node(v).static_stubs.count(node.communities) > 0]
+        dest_nodes = list(set(dest_nodes) - set(node.predicted_neighbors) - {node_id})
+        # count can be done on open stubs only to reduce execution runtime
+        open_stubs = [v for v in dest_nodes if (v, node.communities) in unmatched_stubs and graph.get_node(v).static_stubs.count(node.communities) > 0]
+        if len(open_stubs) > 0:
+            chosen_node_id = random.choice(open_stubs)
+            predicted_edges.append((min(node_id, chosen_node_id), max(node_id, chosen_node_id)))
             predicted_matrix[node_id-1, chosen_node_id-1] = 1
             predicted_matrix[chosen_node_id-1, node_id-1] = 1
-        node.stubs = []
+            chosen_node = graph.get_node(chosen_node_id)
+            chosen_node.predicted_neighbors.append(node_id)
+            node.predicted_neighbors.append(chosen_node_id)
+            unmatched_stubs.remove((chosen_node_id, node.communities))
+        else:
+            # Can be further optimized by solving all issues with this community combination pair as we already have the subgraph from the two community combinations
+            src_nodes = set.intersection(*(graph.communities[comm] for comm in node.communities)) - {node_id}
+            src_nodes = [v for v in src_nodes if graph.get_node(v).communities == node.communities and graph.get_node(v).static_stubs.count(dest_comms) > 0]
+            chosen_node_id = random.choice(dest_nodes)
+            predicted_edges.append((min(node_id, chosen_node_id), max(node_id, chosen_node_id)))
+            predicted_matrix[node_id-1, chosen_node_id-1] = 1
+            predicted_matrix[chosen_node_id-1, node_id-1] = 1
+            chosen_node = graph.get_node(chosen_node_id)
+            chosen_node.predicted_neighbors.append(node_id)
+            node.predicted_neighbors.append(chosen_node_id)
+            src_nodes = [v for v in src_nodes if chosen_node_id in graph.get_node(v).predicted_neighbors]
+            broken_node_id = random.choice(src_nodes)
+            broken_node = graph.get_node(broken_node_id)
+            broken_node.predicted_neighbors.remove(chosen_node_id)
+            chosen_node.predicted_neighbors.remove(broken_node_id)
+            predicted_edges.remove((min(chosen_node_id, broken_node_id), max(chosen_node_id, broken_node_id)))
+            predicted_matrix[chosen_node_id-1, broken_node_id-1] = 0
+            predicted_matrix[broken_node_id-1, chosen_node_id-1] = 0
+            unmatched_stubs.append((broken_node_id, dest_comms))
+
     return predicted_edges, predicted_matrix
 
 def plot_spectral_density(adjacency_matrix, ax=None):
-    hamiltonian_matrix = sp.csr_matrix(adjacency_matrix)
-    dos = kwant.kpm.SpectralDensity(hamiltonian_matrix)
-    k = min(50, adjacency_matrix.shape[0]-2)
-    eigenvalues = eigsh(hamiltonian_matrix, k=k, return_eigenvectors=False)
+    degrees = np.array(adjacency_matrix.sum(axis=1)).flatten()
+    degree_matrix = sp.diags(degrees)
+    laplacian_matrix = degree_matrix - adjacency_matrix
+    L = sp.csr_matrix(laplacian_matrix)
+    dos = kwant.kpm.SpectralDensity(L)
+    k = max(2, int(percent_eigenvalue_plot * 0.01 * adjacency_matrix.shape[0]))
+    eigenvalues = eigsh(L, k=k, return_eigenvectors=False, which="SM")
     padding = 0.1 * (eigenvalues.max() - eigenvalues.min())
     energy_range = (eigenvalues.min() - padding, eigenvalues.max() + padding)
     energies = np.linspace(energy_range[0], energy_range[1], 200)
@@ -355,7 +409,7 @@ def plot_spectral_density(adjacency_matrix, ax=None):
     ax.plot(energies, rho)
     ax.set_xlabel("Eigenvalues")
     ax.set_ylabel("Density")
-    ax.set_title("Eigenvalue Distribution of Graph (KPM)")
+    ax.set_title("Eigenvalue Distribution of Graph Laplacian (KPM)")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
