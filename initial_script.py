@@ -1,4 +1,5 @@
 import argparse
+import copy
 import kwant
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -12,7 +13,7 @@ from matplotlib.patches import Patch, Ellipse
 from scipy.sparse.linalg import eigsh
 
 epsilon = 1e-8
-percent_eigenvalue_plot = 0.1
+percent_eigenvalue_plot = 10
 
 class Remapper:
     edge_file: str
@@ -108,6 +109,9 @@ class Node:
     degree: int
     static_stubs: list[list[int]]
     stubs: list[list[int]]
+    connectivity: set[int]
+    static_order: dict[int, int]
+    order: dict[int, int]
 
     def __init__(self):
         self.neighbors = []
@@ -116,6 +120,9 @@ class Node:
         self.degree = 0
         self.static_stubs = []
         self.stubs = []
+        self.connectivity = set()
+        self.static_order = {}
+        self.order = {}
 
     def add_community(self, comm_id):
         self.communities.append(comm_id)
@@ -314,7 +321,190 @@ class GraphReader:
                 neighbors = sorted(adj[i])
                 f.write(" ".join(map(str, neighbors)) + "\n")
 
+def increase_node_order(node, overlap_size):
+    if node.order.get(overlap_size, 0) == 0:
+        node.order.update({overlap_size: 0})
+    node.order[overlap_size] += 1
+
+def update_unmatched_stubs(unmatched_stubs, b_id, overlap_size):
+    for i, (v_id, v_size, v_num) in enumerate(unmatched_stubs):
+        if v_id == b_id and v_size == overlap_size:
+            unmatched_stubs[i] = (v_id, v_size, v_num+1)
+            return
+    unmatched_stubs.append((b_id, overlap_size, 1))
+
+def break_prior_edges(unmatched_stubs, possible_nodes, overlap_size, src_comm_len, predicted_edges, predicted_matrix, req_num_dest_nodes):
+    counter = 0
+    chosen_nodes = []
+    while counter < req_num_dest_nodes:
+        c_id = possible_nodes[counter]
+        chosen_node = graph.get_node(c_id)
+        # this condition could be something to look at: set(graph.get_node(v).communities) != set(node.communities)
+        broken_possibilites = [v for v in chosen_node.predicted_neighbors if len(graph.get_node(v).communities) == src_comm_len]
+        if len(broken_possibilites) == 0:
+            continue
+        b_id = random.choice(broken_possibilites)
+        broken_node = graph.get_node(b_id)
+        broken_node.predicted_neighbors.remove(c_id)
+        chosen_node.predicted_neighbors.remove(b_id)
+        predicted_edges.remove((min(b_id, c_id), max(b_id, c_id)))
+        predicted_matrix[c_id-1, b_id-1] = 0
+        predicted_matrix[b_id-1, c_id-1] = 0
+        update_unmatched_stubs(unmatched_stubs, b_id, overlap_size)
+        increase_node_order(broken_node, overlap_size)
+        increase_node_order(chosen_node, src_comm_len)
+        counter += 1
+        chosen_nodes.append(c_id)
+    return chosen_nodes
+
+def reduce_unmatched_stubs(unmatched_stubs, open_stubs, src_comm_len):
+    for i in range(len(unmatched_stubs)-1, -1, -1):
+        v_id, v_size, v_num = unmatched_stubs[i]
+        if v_id in open_stubs and v_size == src_comm_len:
+            v_num -= 1
+            if v_num > 0:
+                unmatched_stubs[i] = (v_id, v_size, v_num)
+            else:
+                unmatched_stubs.pop(i)
+
+def has_unmatched_entry(unmatched_stubs, u_id, src_comm_len):
+    for i, (v_id, v_size, v_num) in enumerate(unmatched_stubs):
+        if u_id == v_id and v_size == src_comm_len:
+            return True
+    return False
+
+def find_unmatched_stubs(graph):
+    unmatched_stubs = []
+    for node_id, node in enumerate(graph.nodes, 1):
+        for overlap_size, num_items in node.order.items():
+            unmatched_stubs.append((node_id, overlap_size, num_items))
+    return unmatched_stubs
+
+def find_involved_nodes(graph, node, node_id):
+    all_nodes = set.union(*(graph.communities[comm] for comm in node.connectivity)) - {node_id}
+    return set([v for v in all_nodes if set(graph.get_node(v).communities).issubset(node.connectivity)])
+
+def update_node_order(node, overlap_size, num_connections):
+    node.order[overlap_size] -= num_connections
+    if node.order[overlap_size] == 0:
+        node.order.pop(overlap_size)
+
+def connect_to_chosen_nodes(chosen_nodes, node, node_id, src_comm_len, predicted_edges, predicted_matrix):
+    for c_id in chosen_nodes:
+        chosen_node = graph.get_node(c_id)
+        chosen_node.predicted_neighbors.append(node_id)
+        node.predicted_neighbors.append(c_id)
+        update_node_order(chosen_node, src_comm_len, 1)
+        predicted_edges.append((min(node_id, c_id), max(node_id, c_id)))
+        predicted_matrix[node_id-1, c_id-1] = 1
+        predicted_matrix[c_id-1, node_id-1] = 1
+
+def update_stub_info(graph):
+    for node in graph.nodes:
+        for stub in node.static_stubs:
+            stub_len = len(stub)
+            if stub_len not in node.order:
+                node.static_order[stub_len] = 0
+                node.order[stub_len] = 0
+            node.static_order[stub_len] += 1
+            node.order[stub_len] += 1
+            node.connectivity.update(stub)
+
+def look_for_open_stubs(union_nodes, unmatched_stubs, node, src_comm_len, overlap_size):
+    possible_nodes = []
+    open_stubs = []
+    for u_id in union_nodes:
+        u = graph.get_node(u_id)
+        if set(u.communities).issubset(node.connectivity) and u.static_order.get(src_comm_len, 0) > 0 and len(u.communities) == overlap_size:
+            if has_unmatched_entry(unmatched_stubs, u_id, src_comm_len):
+                open_stubs.append(u_id)
+            else:
+                possible_nodes.append(u_id)
+    return open_stubs, possible_nodes
+
+def stub_matching2(graph):
+    update_stub_info(graph)
+    # Phase 1: Create first set of connections without breaking any edges
+    n = len(graph.nodes)
+    num_comm = len(graph.communities)
+    randomly_ordered_nodes = list(range(1, n+1))
+    random.shuffle(randomly_ordered_nodes)
+    predicted_edges = []
+    predicted_matrix = np.zeros((n, n), dtype=int)
+    for node_id in randomly_ordered_nodes:
+        node = graph.get_node(node_id)
+        src_comm_len = len(node.communities)
+        involved_nodes = find_involved_nodes(graph, node, node_id)
+        for overlap_size in sorted(node.order, reverse=True):
+            involved_nodes -= set(node.predicted_neighbors)
+            req_num_dest_nodes = int(node.order[overlap_size])
+            possible_nodes = [v for v in involved_nodes if len(graph.get_node(v).communities) == overlap_size and graph.get_node(v).order.get(src_comm_len, 0) > 0]
+            num_choices = min(len(possible_nodes), req_num_dest_nodes)
+            if num_choices == 0:
+                continue
+            chosen_nodes = list(map(int, np.random.choice(possible_nodes, size=num_choices, replace=False)))
+            connect_to_chosen_nodes(chosen_nodes, node, node_id, src_comm_len, predicted_edges, predicted_matrix)
+            update_node_order(node, overlap_size, num_choices)
+
+    unmatched_stubs = find_unmatched_stubs(graph)
+    # Phase 2: Break prior edges to fix subgraph
+    if len(unmatched_stubs) > 0:
+        print("Going through phase 2...")
+        print(f"Percent of unmatched stubs: {200.0*sum([v[2] for v in unmatched_stubs])/sum(sum(graph.adjacency_matrix))}")
+#        careful_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix)
+        random_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix)
+
+    return predicted_edges, predicted_matrix
+
+def careful_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix):
+    while unmatched_stubs:
+        print(f"Remaining: {sum([v[2] for v in unmatched_stubs])}")
+        node_id, overlap_size, req_num_dest_nodes = unmatched_stubs.pop(0)
+        node = graph.get_node(node_id)
+        src_comm_len = len(node.communities)
+        union_nodes = set.union(*(graph.communities[comm] for comm in node.connectivity)) - set(node.predicted_neighbors) - {node_id}
+        open_stubs, possible_nodes = look_for_open_stubs(union_nodes, unmatched_stubs, node, src_comm_len, overlap_size)
+        if len(open_stubs) > 0:
+            open_stubs = open_stubs[:min(req_num_dest_nodes, len(open_stubs))]
+            connect_to_chosen_nodes(open_stubs, node, node_id, src_comm_len, predicted_edges, predicted_matrix)
+            reduce_unmatched_stubs(unmatched_stubs, open_stubs, src_comm_len)
+            update_node_order(node, overlap_size, len(open_stubs))
+            req_num_dest_nodes -= len(open_stubs)
+        if req_num_dest_nodes == 0:
+            continue
+        # If not enough open stubs, break some pre-existing edges
+        randomised_possible_nodes = random.shuffle(possible_nodes)
+#        chosen_nodes = list(map(int, np.random.choice(possible_nodes, size=req_num_dest_nodes, replace=False)))
+        chosen_nodes = break_prior_edges(unmatched_stubs, possible_nodes, overlap_size, src_comm_len, predicted_edges, predicted_matrix, req_num_dest_nodes)
+        connect_to_chosen_nodes(chosen_nodes, node, node_id, src_comm_len, predicted_edges, predicted_matrix)
+        update_node_order(node, overlap_size, req_num_dest_nodes)
+    return predicted_edges, predicted_matrix
+
+def random_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix):
+    # Phase 2: Randomly connect rest of the stubs
+    unmatched_stubs.sort(key=lambda x: x[2], reverse=True)
+    while unmatched_stubs:
+        print(f"Remaining: {sum([v[2] for v in unmatched_stubs])}")
+        src_node_id, _, src_stubs = unmatched_stubs.pop(0)
+        src_node = graph.get_node(src_node_id)
+        idx = 0
+        while unmatched_stubs and src_stubs > 0:
+            dest_node_id, dest_overlap_size, dest_stubs = unmatched_stubs[idx]
+            idx += 1
+            if dest_node_id == src_node_id:
+                continue
+            dest_node = graph.get_node(dest_node_id)
+            dest_node.predicted_neighbors.append(src_node_id)
+            src_node.predicted_neighbors.append(dest_node_id)
+            predicted_edges.append((min(src_node_id, dest_node_id), max(src_node_id, dest_node_id)))
+            predicted_matrix[src_node_id-1, dest_node_id-1] = 1
+            predicted_matrix[dest_node_id-1, src_node_id-1] = 1
+            src_stubs -= 1
+            unmatched_stubs[idx-1] = (dest_node_id, dest_overlap_size, dest_stubs-1)
+    return predicted_edges, predicted_matrix
+
 def stub_matching(graph):
+    # low rank approximation: What info do I lose, Ricci flow algorithm (shrink similar edges and expand differents, cut the expanded edges to get clusters), eckart-young-mirsky theorem
     n = len(graph.nodes)
     randomly_ordered_nodes = list(range(1, n+1))
     random.shuffle(randomly_ordered_nodes)
@@ -399,7 +589,8 @@ def plot_spectral_density(adjacency_matrix, ax=None):
     L = sp.csr_matrix(laplacian_matrix)
     dos = kwant.kpm.SpectralDensity(L)
     k = max(2, int(percent_eigenvalue_plot * 0.01 * adjacency_matrix.shape[0]))
-    eigenvalues = eigsh(L, k=k, return_eigenvectors=False, which="SM")
+    eigenvalues = eigsh(L, k=k, return_eigenvectors=False)
+#    eigenvalues = eigsh(L, k=k, return_eigenvectors=False, which="SM")
     padding = 0.1 * (eigenvalues.max() - eigenvalues.min())
     energy_range = (eigenvalues.min() - padding, eigenvalues.max() + padding)
     energies = np.linspace(energy_range[0], energy_range[1], 200)
@@ -444,7 +635,7 @@ if __name__ == "__main__":
         reader = GraphReader(args.community_size, args.child_directory)
         graph = reader.read_metis_file()
         start_time = time.time()
-        predicted_edges, predicted_matrix = stub_matching(graph)
+        predicted_edges, predicted_matrix = stub_matching2(graph)
         end_time = time.time()
 
         num_nodes = len(graph.nodes)
@@ -465,4 +656,6 @@ if __name__ == "__main__":
         axes[1].set_ylim(ymin, ymax)
         plt.tight_layout()
         plt.show()
+#        plt.savefig(f"dataset/{args.child_directory}/small_graphs/plot{args.community_size}.png")
+#        plt.close()
 
