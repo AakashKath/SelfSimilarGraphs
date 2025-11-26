@@ -1,6 +1,7 @@
 import argparse
 import copy
 import kwant
+import math
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -337,13 +338,16 @@ def break_prior_edges(unmatched_stubs, possible_nodes, overlap_size, src_comm_le
     counter = 0
     chosen_nodes = []
     while counter < req_num_dest_nodes:
-        c_id = possible_nodes[counter]
+        c_id = possible_nodes.pop(0)
         chosen_node = graph.get_node(c_id)
         # this condition could be something to look at: set(graph.get_node(v).communities) != set(node.communities)
         broken_possibilites = [v for v in chosen_node.predicted_neighbors if len(graph.get_node(v).communities) == src_comm_len]
         if len(broken_possibilites) == 0:
             continue
         b_id = random.choice(broken_possibilites)
+        if b_id in possible_nodes:
+            possible_nodes.remove(b_id)
+            counter += 1
         broken_node = graph.get_node(b_id)
         broken_node.predicted_neighbors.remove(c_id)
         chosen_node.predicted_neighbors.remove(b_id)
@@ -451,14 +455,26 @@ def stub_matching2(graph):
     if len(unmatched_stubs) > 0:
         print("Going through phase 2...")
         print(f"Percent of unmatched stubs: {200.0*sum([v[2] for v in unmatched_stubs])/sum(sum(graph.adjacency_matrix))}")
-#        careful_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix)
+        temp_graph = copy.deepcopy(graph)
+        temp_unmatched_stubs = copy.deepcopy(unmatched_stubs)
+        temp_predicted_edges = copy.deepcopy(predicted_edges)
+        temp_predicted_matrix = copy.deepcopy(predicted_matrix)
+        time1 = time.time()
+        print(f"Before Random Remaining: {sum([v[2] for v in unmatched_stubs])}")
+        random_matching(temp_graph, temp_unmatched_stubs, temp_predicted_edges, temp_predicted_matrix)
+        time2 = time.time()
+        initial_open_stubs = sum([v[2] for v in unmatched_stubs])
+        careful_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix, initial_open_stubs)
         random_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix)
+        time3 = time.time()
+        print(f"Time : Random matching is {(time3-time2)/(time2-time1)} times faster than Careful matching.")
 
-    return predicted_edges, predicted_matrix
+    return temp_predicted_edges, temp_predicted_matrix, predicted_edges, predicted_matrix
 
-def careful_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix):
+def careful_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix, initial_open_stubs):
     while unmatched_stubs:
-        print(f"Remaining: {sum([v[2] for v in unmatched_stubs])}")
+        if 1.0*sum([v[2] for v in unmatched_stubs])/initial_open_stubs < 0.1:
+            return
         node_id, overlap_size, req_num_dest_nodes = unmatched_stubs.pop(0)
         node = graph.get_node(node_id)
         src_comm_len = len(node.communities)
@@ -473,35 +489,54 @@ def careful_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix):
         if req_num_dest_nodes == 0:
             continue
         # If not enough open stubs, break some pre-existing edges
-        randomised_possible_nodes = random.shuffle(possible_nodes)
+        random.shuffle(possible_nodes)
 #        chosen_nodes = list(map(int, np.random.choice(possible_nodes, size=req_num_dest_nodes, replace=False)))
         chosen_nodes = break_prior_edges(unmatched_stubs, possible_nodes, overlap_size, src_comm_len, predicted_edges, predicted_matrix, req_num_dest_nodes)
         connect_to_chosen_nodes(chosen_nodes, node, node_id, src_comm_len, predicted_edges, predicted_matrix)
         update_node_order(node, overlap_size, req_num_dest_nodes)
-    return predicted_edges, predicted_matrix
 
 def random_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix):
     # Phase 2: Randomly connect rest of the stubs
-    unmatched_stubs.sort(key=lambda x: x[2], reverse=True)
     while unmatched_stubs:
-        print(f"Remaining: {sum([v[2] for v in unmatched_stubs])}")
+        unmatched_stubs.sort(key=lambda x: x[2], reverse=True)
         src_node_id, _, src_stubs = unmatched_stubs.pop(0)
         src_node = graph.get_node(src_node_id)
+        # Break some uniform nodes to make sure there are no multi/self edges
+        if src_stubs > len(unmatched_stubs):
+            unmatched_stubs.extend(break_random_edges(graph, src_node, src_node_id, src_stubs, [v[0] for v in unmatched_stubs], predicted_edges, predicted_matrix))
         idx = 0
-        while unmatched_stubs and src_stubs > 0:
+        while idx < src_stubs:
             dest_node_id, dest_overlap_size, dest_stubs = unmatched_stubs[idx]
-            idx += 1
-            if dest_node_id == src_node_id:
-                continue
             dest_node = graph.get_node(dest_node_id)
             dest_node.predicted_neighbors.append(src_node_id)
             src_node.predicted_neighbors.append(dest_node_id)
             predicted_edges.append((min(src_node_id, dest_node_id), max(src_node_id, dest_node_id)))
             predicted_matrix[src_node_id-1, dest_node_id-1] = 1
             predicted_matrix[dest_node_id-1, src_node_id-1] = 1
-            src_stubs -= 1
-            unmatched_stubs[idx-1] = (dest_node_id, dest_overlap_size, dest_stubs-1)
-    return predicted_edges, predicted_matrix
+            if dest_stubs == 1:
+                unmatched_stubs.pop(idx)
+                src_stubs -= 1
+            else:
+                unmatched_stubs[idx] = (dest_node_id, dest_overlap_size, dest_stubs-1)
+                idx += 1
+
+def break_random_edges(graph, src_node, src_node_id, src_stubs, pre_existing_stubs, predicted_edges, predicted_matrix):
+    newly_open_stubs = []
+    remaining_stubs = math.ceil((src_stubs-len(pre_existing_stubs))/2)
+    possible_nodes = list(set(range(1, len(graph.nodes)+1)) - set(src_node.predicted_neighbors) - set(pre_existing_stubs) - {src_node_id})
+    chosen_nodes = list(map(int, np.random.choice(possible_nodes, size=remaining_stubs, replace=False)))
+    for c_id in chosen_nodes:
+        newly_open_stubs.append((c_id, 0, 1))
+        chosen_node = graph.get_node(c_id)
+        b_id = random.choice(chosen_node.predicted_neighbors)
+        newly_open_stubs.append((b_id, 0, 1))
+        broken_node = graph.get_node(b_id)
+        broken_node.predicted_neighbors.remove(c_id)
+        chosen_node.predicted_neighbors.remove(b_id)
+        predicted_edges.remove((min(b_id, c_id), max(b_id, c_id)))
+        predicted_matrix[b_id-1, c_id-1] = 0
+        predicted_matrix[c_id-1, b_id-1] = 0
+    return newly_open_stubs
 
 def stub_matching(graph):
     # low rank approximation: What info do I lose, Ricci flow algorithm (shrink similar edges and expand differents, cut the expanded edges to get clusters), eckart-young-mirsky theorem
@@ -635,7 +670,7 @@ if __name__ == "__main__":
         reader = GraphReader(args.community_size, args.child_directory)
         graph = reader.read_metis_file()
         start_time = time.time()
-        predicted_edges, predicted_matrix = stub_matching2(graph)
+        predicted_edges1, predicted_matrix1, predicted_edges2, predicted_matrix2 = stub_matching2(graph)
         end_time = time.time()
 
         num_nodes = len(graph.nodes)
@@ -644,16 +679,17 @@ if __name__ == "__main__":
             for j in range(i, num_nodes):
                 if graph.adjacency_matrix[i, j] == 1:
                     original_edges.add((i+1, j+1))
-        predicted_edges = set([(min(a, b), max(a, b)) for a, b in predicted_edges])
-        print(f"Time taken: {end_time - start_time} seconds. Newly seen edges: {(len(predicted_edges - original_edges)*100.0)/len(predicted_edges)}%")
+        print(f"Time taken: {end_time - start_time} seconds. Newly seen edges:: Random: {(len(set(predicted_edges1) - original_edges)*100.0)/len(predicted_edges1)}% Careful: {(len(set(predicted_edges2) - original_edges)*100.0)/len(predicted_edges2)}%")
 
-        fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+        fig, axes = plt.subplots(1, 3, figsize=(16, 8))
         plot_spectral_density(graph.adjacency_matrix, ax=axes[0])
-        plot_spectral_density(predicted_matrix, ax=axes[1])
-        ymin = min(axes[0].get_ylim()[0], axes[1].get_ylim()[0])
-        ymax = max(axes[0].get_ylim()[1], axes[1].get_ylim()[1])
+        plot_spectral_density(predicted_matrix1, ax=axes[1])
+        plot_spectral_density(predicted_matrix2, ax=axes[2])
+        ymin = min(axes[0].get_ylim()[0], axes[1].get_ylim()[0], axes[2].get_ylim()[0])
+        ymax = max(axes[0].get_ylim()[1], axes[1].get_ylim()[1], axes[2].get_ylim()[1])
         axes[0].set_ylim(ymin, ymax)
         axes[1].set_ylim(ymin, ymax)
+        axes[2].set_ylim(ymin, ymax)
         plt.tight_layout()
         plt.show()
 #        plt.savefig(f"dataset/{args.child_directory}/small_graphs/plot{args.community_size}.png")
