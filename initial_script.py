@@ -465,6 +465,7 @@ def stub_matching2(graph):
         time2 = time.time()
         initial_open_stubs = sum([v[2] for v in unmatched_stubs])
         careful_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix, initial_open_stubs)
+        print(f"After Careful Remaining: {sum([v[2] for v in unmatched_stubs])}")
         random_matching(graph, unmatched_stubs, predicted_edges, predicted_matrix)
         time3 = time.time()
         print(f"Time : Random matching is {(time3-time2)/(time2-time1)} times faster than Careful matching.")
@@ -691,7 +692,7 @@ if __name__ == "__main__":
         axes[1].set_ylim(ymin, ymax)
         axes[2].set_ylim(ymin, ymax)
         plt.tight_layout()
-        plt.show()
-#        plt.savefig(f"dataset/{args.child_directory}/small_graphs/plot{args.community_size}.png")
-#        plt.close()
+#        plt.show()
+        plt.savefig(f"dataset/{args.child_directory}/small_graphs/plot{args.community_size}.png")
+        plt.close()
 
