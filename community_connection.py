@@ -1,8 +1,9 @@
 import argparse
 import matplotlib.pyplot as plt
+import numpy as np
 import pdb
 import random
-from collections import defaultdict, deque
+from collections import defaultdict, deque, Counter
 from graph import GraphReader
 from itertools import repeat
 from math import ceil
@@ -37,6 +38,38 @@ class CommunityList:
         self.idx += 1
         return comm
 
+    def break_some_bonds(self, stub_dict, by_weight, weight):
+        counter = 0
+        while stub_dict:
+            stub_list = by_weight[weight]
+            b_id = random.choice(list(set(stub_list)-set(stub_dict.keys())))
+            broken_comm = self.get_community(b_id)
+            b_ids = random.choice([v for v in broken_comm.overlaps if len(v) == weight])
+            for b_id in b_ids:
+                broken_comm = self.get_community(b_id)
+                broken_comm.overlaps.remove(b_ids)
+                if b_id not in stub_dict:
+                    stub_dict[b_id] = 0
+                stub_dict[b_id] += 1
+            stub_dict = self.match_stub_dict(stub_dict, weight)
+
+    def match_stub_dict(self, stub_dict, weight):
+        while True:
+            keys = np.array(list(stub_dict.keys()))
+            if len(keys) < weight:
+                if len(keys) != 0:
+                    return {k: v for k, v in stub_dict.items() if v != 0}
+                return {}
+            values = np.array(list(stub_dict.values()), dtype=float)
+            prob = values/values.sum()
+            chosen_comms = list(map(int, np.random.choice(keys, size=weight, replace=False, p=prob)))
+            for comm_id in chosen_comms:
+                stub_dict[comm_id] -= 1
+                if stub_dict[comm_id] == 0:
+                    del stub_dict[comm_id]
+                comm = self.get_community(comm_id)
+                comm.overlaps.append(chosen_comms)
+
     def stub_matching(self):
         by_weight = defaultdict(list)
         for comm in self.communities:
@@ -45,28 +78,16 @@ class CommunityList:
         overlaps = []
         unmatched_stubs = []
         for weight, stub_list in by_weight.items():
-            stub_list = deque(stub_list)
-            random.shuffle(stub_list)
-            counter = 0
-            while counter < len(stub_list):
-                combination = set()
-                while len(combination) != weight and counter < len(stub_list):
-                    comm_id = stub_list.popleft()
-                    if comm_id in combination:
-                        stub_list.append(comm_id)
-                        counter += 1
-                        continue
-                    combination.add(comm_id)
-                    counter = 0
-                if len(combination) == weight:
-                    overlaps.append(list(combination))
-                    for comm_id in combination:
-                        comm = self.get_community(comm_id)
-                        comm.overlaps.append(combination)
-                else:
-                    unmatched_stubs.append((weight, combination))
+            stub_dict = dict(Counter(stub_list))
+            result = self.match_stub_dict(stub_dict, weight)
+            if result:
+                unmatched_stubs.append((weight, result))
         print(f"Percent of unmatched stubs: {100.0*sum([len(c) for _, c in unmatched_stubs])/sum([len(v) for v in by_weight.values()])}")
-        # TODO: Maybe we need- Phase 2: Randomly connect rest of the stubs
+        # Phase 2: Randomly connect rest of the stubs
+        while unmatched_stubs:
+            weight, stub_dict = unmatched_stubs.pop()
+            self.break_some_bonds(stub_dict, by_weight, weight)
+        print(f"Percent of unmatched stubs: {100.0*sum([len(c) for _, c in unmatched_stubs])/sum([len(v) for v in by_weight.values()])}")
         return overlaps
 
 def plot_3d(details, ax, title):
@@ -125,13 +146,14 @@ def collect_graph_info(graph):
         number_of_overlap = 0
         for node_id in node_list:
             node = graph.get_node(node_id)
-            comm_combination = "_".join(map(str, node.communities))
+            comm_combination = "_".join(map(str, sorted(node.communities)))
             if comm_combination not in empty_set:
                 empty_set.add(comm_combination)
                 combination_count = len(node.communities)
                 empty_dict[combination_count] = empty_dict.get(combination_count, 0) + 1
                 number_of_overlap += 1
-        key = f"{len(node_list)}_{number_of_overlap}"
+        # TODO: _{comm_id} is appended to keep communities different, should be removed once we implement scale
+        key = f"{len(node_list)}_{number_of_overlap}_{comm_id}"
         if key not in collapsed_info:
             collapsed_info[key] = {}
         for k, v in empty_dict.items():
@@ -148,16 +170,18 @@ def draw_graph_with_collapsed_info(collapsed_info, scale):
         stub_distribution.append((list(cv.keys()), list(cv.values()), number_of_unique_overlap, int(ck.split("_")[0])))
         weights.append(number_of_communities)
     # TODO: Remove the debug part to include scale, but before that please include scale logic at stub level
+    comm_list = CommunityList()
     debug = True
     if debug:
         sampled_comm = [x for v, r in zip(stub_distribution, weights) for x in repeat(v, r)]
+        for stubs, weight, required_stubs, community_size in sampled_comm:
+            comm_list.add_community([x for v, r in zip(stubs, weight) for x in repeat(v, r)], community_size)
     else:
         required_comm = ceil(original_communities*scale/100)
         sampled_comm = random.choices(stub_distribution, weights, k=required_comm)
-    comm_list = CommunityList()
-    for stubs, weights, required_stubs, community_size in sampled_comm:
-        sampled_stubs = random.choices(stubs, weights, k=required_stubs)
-        comm_list.add_community(sampled_stubs, community_size)
+        for stubs, weights, required_stubs, community_size in sampled_comm:
+            sampled_stubs = random.choices(stubs, weights, k=required_stubs)
+            comm_list.add_community(sampled_stubs, community_size)
     overlaps = comm_list.stub_matching()
 
 if __name__ == "__main__":
