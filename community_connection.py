@@ -129,7 +129,6 @@ def draw_community_graph(graph):
         update_plot_dict(details_with_size, f"{len(node_list)}_{size_of_overlap}")
         update_plot_dict(details_with_number, f"{len(node_list)}_{len(number_of_overlap)-1}")
 
-    pdb.set_trace()
     fig = plt.figure(figsize=(12, 6))
     ax1 = fig.add_subplot(1, 2, 1, projection="3d")
     ax2 = fig.add_subplot(1, 2, 2, projection="3d")
